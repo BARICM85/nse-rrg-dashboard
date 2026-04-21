@@ -6,6 +6,7 @@ A Python + Streamlit dashboard for Indian market rotation analysis using Relativ
 
 - Fetches NSE benchmark, sector indices, and stocks using `yfinance`
 - Builds a sector-level RRG against `^NSEI`
+- Builds a separate sector-level RRG against `^CRSLDX` (NIFTY 500)
 - Lets you rotate a selected sector set against either `^NSEI` or an equal-weight sector basket
 - Builds stock-level RRG inside each selected sector
 - Adds a NIFTY stock search panel for single-stock RRG lookup
@@ -86,7 +87,8 @@ If the SDK or credentials are unavailable, the app falls back to mock mode autom
 ### Sector rotation comparison
 
 - Use `Sector rotation comparison set` to limit the sector graph to chosen sectors
-- Use `Sector rotation benchmark` to switch between:
+- The dashboard now also plots a second sector chart separately against `NIFTY 500`
+- Use `Sector rotation benchmark` to switch the left chart between:
   - `NIFTY 50`
   - `Equal-weight sector basket`
 

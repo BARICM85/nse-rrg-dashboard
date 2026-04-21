@@ -154,16 +154,26 @@ def main() -> None:
     imported_holding_symbols = unique_preserve_order(holdings_frame.get("yfinance_symbol", pd.Series(dtype=str)).tolist()) if not holdings_frame.empty else []
 
     benchmark = config.benchmark_symbol
+    broad_benchmark = config.broad_benchmark_symbol
     sector_symbols = list(SECTOR_INDEX_UNIVERSE.values())
     sector_labels = {value: key for key, value in SECTOR_INDEX_UNIVERSE.items()}
     tracked_stock_symbols = unique_preserve_order(
         [symbol for sector_symbols_list in SECTOR_STOCK_UNIVERSE.values() for symbol in sector_symbols_list]
     )
     stock_search_options = unique_preserve_order(NIFTY_STOCK_SEARCH_UNIVERSE + tracked_stock_symbols + imported_holding_symbols)
-    sector_prices = load_prices([benchmark, *sector_symbols], period=period)
+    sector_prices_nifty50 = load_prices([benchmark, *sector_symbols], period=period)
     sector_snapshot = build_rrg_snapshot(
-        price_frame=sector_prices,
+        price_frame=sector_prices_nifty50,
         benchmark_symbol=benchmark,
+        tail_periods=config.tail_periods,
+        roc_period=config.roc_period,
+        zscore_window=config.zscore_window,
+        labels=sector_labels,
+    )
+    sector_prices_nifty500 = load_prices([broad_benchmark, *sector_symbols], period=period)
+    sector_snapshot_nifty500 = build_rrg_snapshot(
+        price_frame=sector_prices_nifty500,
+        benchmark_symbol=broad_benchmark,
         tail_periods=config.tail_periods,
         roc_period=config.roc_period,
         zscore_window=config.zscore_window,
@@ -173,6 +183,8 @@ def main() -> None:
     if sector_snapshot.empty:
         st.error("No sector data could be loaded. Check network access or data provider response.")
         return
+    if sector_snapshot_nifty500.empty:
+        st.warning("NIFTY 500 sector rotation could not be loaded right now. The NIFTY 50 sector view is still available.")
 
     leading_sector_rows = sector_snapshot.loc[sector_snapshot["quadrant"] == "Leading"].copy()
     sector_comparison_selection = st.multiselect(
@@ -191,9 +203,10 @@ def main() -> None:
     if not sector_comparison_selection:
         sector_comparison_selection = sector_symbols
 
-    selected_sector_prices = sector_prices[[benchmark, *sector_comparison_selection]].copy()
+    selected_sector_prices_50 = sector_prices_nifty50[[benchmark, *sector_comparison_selection]].copy()
+    selected_sector_prices_500 = sector_prices_nifty500[[broad_benchmark, *sector_comparison_selection]].copy()
     if sector_rotation_mode == "Equal-weight sector basket" and len(sector_comparison_selection) >= 2:
-        sector_rotation_prices = build_equal_weight_basket(selected_sector_prices, sector_comparison_selection)
+        sector_rotation_prices = build_equal_weight_basket(selected_sector_prices_50, sector_comparison_selection)
         sector_rotation_snapshot = build_rrg_snapshot(
             price_frame=sector_rotation_prices,
             benchmark_symbol="__SECTOR_BASKET__",
@@ -205,7 +218,7 @@ def main() -> None:
         sector_rotation_title = "Sector Relative Rotation vs equal-weight sector basket"
     else:
         sector_rotation_snapshot = build_rrg_snapshot(
-            price_frame=selected_sector_prices,
+            price_frame=selected_sector_prices_50,
             benchmark_symbol=benchmark,
             tail_periods=config.tail_periods,
             roc_period=config.roc_period,
@@ -213,6 +226,14 @@ def main() -> None:
             labels=sector_labels,
         )
         sector_rotation_title = "Sector Relative Rotation vs NIFTY 50"
+    sector_rotation_snapshot_nifty500 = build_rrg_snapshot(
+        price_frame=selected_sector_prices_500,
+        benchmark_symbol=broad_benchmark,
+        tail_periods=config.tail_periods,
+        roc_period=config.roc_period,
+        zscore_window=config.zscore_window,
+        labels=sector_labels,
+    )
 
     selected_sector_symbol = st.selectbox(
         "Sector for stock-level RRG",
@@ -305,9 +326,9 @@ def main() -> None:
             st.success(message)
         st.session_state["rrg_export_messages"] = []
 
-    sector_chart_col, sector_table_col = st.columns([1.4, 1.0], gap="large")
+    sector_chart_col, sector_chart_col_two = st.columns(2, gap="large")
     with sector_chart_col:
-        st.subheader("Sector rotation")
+        st.subheader("Sector rotation vs NIFTY 50")
         sector_fig = build_rrg_figure(
             snapshot=sector_rotation_snapshot,
             title=sector_rotation_title,
@@ -318,8 +339,24 @@ def main() -> None:
             output = save_chart(sector_fig, "sector_rrg.png")
             st.success(f"Saved to {output}")
 
-    with sector_table_col:
-        st.subheader("Sector quadrant status")
+    with sector_chart_col_two:
+        st.subheader("Sector rotation vs NIFTY 500")
+        if sector_rotation_snapshot_nifty500.empty:
+            st.info("NIFTY 500 benchmark data is unavailable for the selected sector set right now.")
+        else:
+            sector_fig_nifty500 = build_rrg_figure(
+                snapshot=sector_rotation_snapshot_nifty500,
+                title="Sector Relative Rotation vs NIFTY 500",
+                tail_periods=config.tail_periods,
+            )
+            st.pyplot(sector_fig_nifty500, use_container_width=True)
+            if st.button("Save sector chart PNG (NIFTY 500)"):
+                output = save_chart(sector_fig_nifty500, "sector_rrg_nifty500.png")
+                st.success(f"Saved to {output}")
+
+    sector_table_col_50, sector_table_col_500 = st.columns(2, gap="large")
+    with sector_table_col_50:
+        st.subheader("Sector quadrant status vs NIFTY 50")
         sector_table = sector_rotation_snapshot[
             ["label", "quadrant", "rs_ratio", "rs_momentum", "score"]
         ].rename(
@@ -332,6 +369,24 @@ def main() -> None:
             }
         )
         st.dataframe(sector_table, use_container_width=True, hide_index=True)
+
+    with sector_table_col_500:
+        st.subheader("Sector quadrant status vs NIFTY 500")
+        if sector_rotation_snapshot_nifty500.empty:
+            st.info("No NIFTY 500 sector quadrant table available right now.")
+        else:
+            sector_table_nifty500 = sector_rotation_snapshot_nifty500[
+                ["label", "quadrant", "rs_ratio", "rs_momentum", "score"]
+            ].rename(
+                columns={
+                    "label": "Sector",
+                    "quadrant": "Quadrant",
+                    "rs_ratio": "RS Ratio",
+                    "rs_momentum": "RS Momentum",
+                    "score": "Score",
+                }
+            )
+            st.dataframe(sector_table_nifty500, use_container_width=True, hide_index=True)
 
     stock_col, search_col, ideas_col = st.columns([1.2, 1.0, 1.0], gap="large")
     with stock_col:

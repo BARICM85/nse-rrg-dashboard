@@ -12,6 +12,7 @@ EXPORTS_DIR = OUTPUTS_DIR / "exports"
 @dataclass(frozen=True)
 class RRGConfig:
     benchmark_symbol: str = "^NSEI"
+    broad_benchmark_symbol: str = "^CRSLDX"
     tail_periods: int = 10
     roc_period: int = 14
     zscore_window: int = 20
