@@ -5,6 +5,19 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+RRG_SNAPSHOT_COLUMNS = [
+    "symbol",
+    "label",
+    "rs_ratio",
+    "rs_momentum",
+    "quadrant",
+    "score",
+    "tail_x",
+    "tail_y",
+    "tail_dates",
+    "close",
+]
+
 
 def compute_relative_strength(asset_prices: pd.DataFrame, benchmark_series: pd.Series) -> pd.DataFrame:
     aligned_prices, aligned_benchmark = asset_prices.align(benchmark_series, join="inner", axis=0)
@@ -84,4 +97,9 @@ def build_rrg_snapshot(
             }
         )
 
-    return pd.DataFrame(rows).sort_values(["quadrant", "score"], ascending=[True, False]).reset_index(drop=True)
+    if not rows:
+        return pd.DataFrame(columns=RRG_SNAPSHOT_COLUMNS)
+
+    return pd.DataFrame(rows, columns=RRG_SNAPSHOT_COLUMNS).sort_values(
+        ["quadrant", "score"], ascending=[True, False]
+    ).reset_index(drop=True)
