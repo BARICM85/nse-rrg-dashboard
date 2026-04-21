@@ -40,6 +40,55 @@ SECTOR_STOCK_UNIVERSE = {
 }
 
 
+NIFTY_STOCK_SEARCH_UNIVERSE = [
+    "ADANIENT.NS",
+    "ADANIPORTS.NS",
+    "APOLLOHOSP.NS",
+    "ASIANPAINT.NS",
+    "AXISBANK.NS",
+    "BAJAJ-AUTO.NS",
+    "BAJAJFINSV.NS",
+    "BAJFINANCE.NS",
+    "BEL.NS",
+    "BHARTIARTL.NS",
+    "CIPLA.NS",
+    "COALINDIA.NS",
+    "DRREDDY.NS",
+    "EICHERMOT.NS",
+    "ETERNAL.NS",
+    "GRASIM.NS",
+    "HCLTECH.NS",
+    "HDFCBANK.NS",
+    "HDFCLIFE.NS",
+    "HINDALCO.NS",
+    "HINDUNILVR.NS",
+    "ICICIBANK.NS",
+    "INDIGO.NS",
+    "INFY.NS",
+    "ITC.NS",
+    "JSWSTEEL.NS",
+    "KOTAKBANK.NS",
+    "LT.NS",
+    "M&M.NS",
+    "MARUTI.NS",
+    "NESTLEIND.NS",
+    "NTPC.NS",
+    "ONGC.NS",
+    "POWERGRID.NS",
+    "RELIANCE.NS",
+    "SBIN.NS",
+    "SHRIRAMFIN.NS",
+    "SUNPHARMA.NS",
+    "TATACONSUM.NS",
+    "TCS.NS",
+    "TECHM.NS",
+    "TITAN.NS",
+    "TRENT.NS",
+    "ULTRACEMCO.NS",
+    "WIPRO.NS",
+]
+
+
 def build_stock_to_sector_map() -> dict[str, str]:
     mapping: dict[str, str] = {}
     for sector_symbol, symbols in SECTOR_STOCK_UNIVERSE.items():

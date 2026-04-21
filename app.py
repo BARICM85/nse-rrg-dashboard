@@ -8,12 +8,26 @@ import pandas as pd
 import streamlit as st
 
 from rrg_dashboard.charts import build_rrg_figure
-from rrg_dashboard.config import DEFAULT_CONFIG, EXPORTS_DIR, OUTPUTS_DIR, SECTOR_INDEX_UNIVERSE, SECTOR_STOCK_UNIVERSE
+from rrg_dashboard.config import (
+    DEFAULT_CONFIG,
+    EXPORTS_DIR,
+    NIFTY_STOCK_SEARCH_UNIVERSE,
+    OUTPUTS_DIR,
+    SECTOR_INDEX_UNIVERSE,
+    SECTOR_STOCK_UNIVERSE,
+    STOCK_TO_SECTOR,
+)
 from rrg_dashboard.data_sources import fetch_price_history
 from rrg_dashboard.exports import save_dataframe_as_pdf, save_dataframe_as_png
 from rrg_dashboard.kite_adapter import KiteGateway
 from rrg_dashboard.rrg import build_rrg_snapshot
-from rrg_dashboard.screening import build_sector_stock_snapshot, filter_snapshot_for_watchlist, rank_top_stock_candidates
+from rrg_dashboard.screening import (
+    build_sector_stock_snapshot,
+    compute_breakout_flags,
+    compute_ma_filter,
+    filter_snapshot_for_watchlist,
+    rank_top_stock_candidates,
+)
 
 
 st.set_page_config(page_title="NSE RRG Dashboard", layout="wide")
@@ -46,6 +60,35 @@ def bootstrap_state() -> None:
     st.session_state.setdefault("rrg_holdings", pd.DataFrame())
     st.session_state.setdefault("rrg_watchlist_symbols", [])
     st.session_state.setdefault("rrg_export_messages", [])
+
+
+def display_symbol(symbol: str) -> str:
+    if not symbol:
+        return ""
+    if symbol.startswith("^"):
+        return symbol.replace("^", "")
+    for suffix in (".NS", ".BO"):
+        if symbol.endswith(suffix):
+            return symbol[: -len(suffix)]
+    return symbol
+
+
+def build_equal_weight_basket(price_frame: pd.DataFrame, symbols: list[str], basket_symbol: str = "__SECTOR_BASKET__") -> pd.DataFrame:
+    basket_parts: list[pd.Series] = []
+    for symbol in symbols:
+        if symbol not in price_frame.columns:
+            continue
+        series = price_frame[symbol].dropna()
+        if len(series) < 2:
+            continue
+        basket_parts.append((series / float(series.iloc[0])).rename(symbol))
+
+    if not basket_parts:
+        return pd.DataFrame()
+
+    basket_frame = pd.concat(basket_parts, axis=1).dropna(how="all")
+    basket_series = basket_frame.mean(axis=1).rename(basket_symbol)
+    return pd.concat([price_frame[symbols], basket_series], axis=1).dropna(how="all")
 
 
 def render_status_card(title: str, value: str, note: str) -> None:
@@ -113,6 +156,10 @@ def main() -> None:
     benchmark = config.benchmark_symbol
     sector_symbols = list(SECTOR_INDEX_UNIVERSE.values())
     sector_labels = {value: key for key, value in SECTOR_INDEX_UNIVERSE.items()}
+    tracked_stock_symbols = unique_preserve_order(
+        [symbol for sector_symbols_list in SECTOR_STOCK_UNIVERSE.values() for symbol in sector_symbols_list]
+    )
+    stock_search_options = unique_preserve_order(NIFTY_STOCK_SEARCH_UNIVERSE + tracked_stock_symbols + imported_holding_symbols)
     sector_prices = load_prices([benchmark, *sector_symbols], period=period)
     sector_snapshot = build_rrg_snapshot(
         price_frame=sector_prices,
@@ -128,6 +175,45 @@ def main() -> None:
         return
 
     leading_sector_rows = sector_snapshot.loc[sector_snapshot["quadrant"] == "Leading"].copy()
+    sector_comparison_selection = st.multiselect(
+        "Sector rotation comparison set",
+        options=sector_symbols,
+        default=sector_symbols,
+        format_func=lambda symbol: sector_labels.get(symbol, symbol),
+        help="Choose which sectors to include in the sector rotation graph.",
+    )
+    sector_rotation_mode = st.radio(
+        "Sector rotation benchmark",
+        options=["NIFTY 50", "Equal-weight sector basket"],
+        horizontal=True,
+        help="Compare selected sectors against NIFTY 50 or against their own equal-weight basket.",
+    )
+    if not sector_comparison_selection:
+        sector_comparison_selection = sector_symbols
+
+    selected_sector_prices = sector_prices[[benchmark, *sector_comparison_selection]].copy()
+    if sector_rotation_mode == "Equal-weight sector basket" and len(sector_comparison_selection) >= 2:
+        sector_rotation_prices = build_equal_weight_basket(selected_sector_prices, sector_comparison_selection)
+        sector_rotation_snapshot = build_rrg_snapshot(
+            price_frame=sector_rotation_prices,
+            benchmark_symbol="__SECTOR_BASKET__",
+            tail_periods=config.tail_periods,
+            roc_period=config.roc_period,
+            zscore_window=config.zscore_window,
+            labels=sector_labels,
+        )
+        sector_rotation_title = "Sector Relative Rotation vs equal-weight sector basket"
+    else:
+        sector_rotation_snapshot = build_rrg_snapshot(
+            price_frame=selected_sector_prices,
+            benchmark_symbol=benchmark,
+            tail_periods=config.tail_periods,
+            roc_period=config.roc_period,
+            zscore_window=config.zscore_window,
+            labels=sector_labels,
+        )
+        sector_rotation_title = "Sector Relative Rotation vs NIFTY 50"
+
     selected_sector_symbol = st.selectbox(
         "Sector for stock-level RRG",
         options=sector_symbols,
@@ -142,6 +228,30 @@ def main() -> None:
         sector_prices=stock_prices,
         config=config,
     )
+    stock_search_symbol = st.selectbox(
+        "NIFTY stock search in RRG",
+        options=stock_search_options,
+        index=stock_search_options.index("INFY.NS") if "INFY.NS" in stock_search_options else 0,
+        format_func=display_symbol,
+        help="Track an individual stock against NIFTY 50, even if it is outside the currently selected sector pane.",
+    )
+    stock_search_prices = load_prices([benchmark, stock_search_symbol], period=period)
+    stock_search_snapshot = build_rrg_snapshot(
+        price_frame=stock_search_prices,
+        benchmark_symbol=benchmark,
+        tail_periods=config.tail_periods,
+        roc_period=config.roc_period,
+        zscore_window=config.zscore_window,
+        labels={stock_search_symbol: display_symbol(stock_search_symbol)},
+    )
+    searched_stock_sector = STOCK_TO_SECTOR.get(stock_search_symbol)
+    searched_stock_sector_name = sector_labels.get(searched_stock_sector, "Broader NIFTY search universe")
+    stock_search_frame = stock_search_prices.drop(columns=[benchmark], errors="ignore")
+    search_above_200dma = False
+    search_breakout = False
+    if not stock_search_frame.empty:
+        search_above_200dma = bool(compute_ma_filter(stock_search_frame, window=config.ma_window).get(stock_search_symbol, False))
+        search_breakout = bool(compute_breakout_flags(stock_search_frame, window=config.breakout_window).get(stock_search_symbol, False))
 
     top_candidates = rank_top_stock_candidates(
         sector_snapshot=sector_snapshot,
@@ -199,8 +309,8 @@ def main() -> None:
     with sector_chart_col:
         st.subheader("Sector rotation")
         sector_fig = build_rrg_figure(
-            snapshot=sector_snapshot,
-            title="Sector Relative Rotation vs NIFTY 50",
+            snapshot=sector_rotation_snapshot,
+            title=sector_rotation_title,
             tail_periods=config.tail_periods,
         )
         st.pyplot(sector_fig, use_container_width=True)
@@ -210,7 +320,7 @@ def main() -> None:
 
     with sector_table_col:
         st.subheader("Sector quadrant status")
-        sector_table = sector_snapshot[
+        sector_table = sector_rotation_snapshot[
             ["label", "quadrant", "rs_ratio", "rs_momentum", "score"]
         ].rename(
             columns={
@@ -223,7 +333,7 @@ def main() -> None:
         )
         st.dataframe(sector_table, use_container_width=True, hide_index=True)
 
-    stock_col, ideas_col = st.columns([1.4, 1.0], gap="large")
+    stock_col, search_col, ideas_col = st.columns([1.2, 1.0, 1.0], gap="large")
     with stock_col:
         st.subheader(f"Stock RRG inside {selected_sector_name}")
         if stock_snapshot.empty:
@@ -238,6 +348,27 @@ def main() -> None:
             if st.button("Save stock chart PNG"):
                 output = save_chart(stock_fig, f"{selected_sector_symbol.replace('^', '')}_stock_rrg.png")
                 st.success(f"Saved to {output}")
+
+    with search_col:
+        st.subheader(f"NIFTY stock search: {display_symbol(stock_search_symbol)}")
+        if stock_search_snapshot.empty:
+            st.info("This stock does not have enough clean history yet to build an RRG trail.")
+        else:
+            search_fig = build_rrg_figure(
+                snapshot=stock_search_snapshot,
+                title=f"{display_symbol(stock_search_symbol)} vs NIFTY 50",
+                tail_periods=config.tail_periods,
+            )
+            st.pyplot(search_fig, use_container_width=True)
+            latest_row = stock_search_snapshot.iloc[0]
+            st.caption(f"Mapped sector context: {searched_stock_sector_name}")
+            search_metric_col1, search_metric_col2 = st.columns(2)
+            with search_metric_col1:
+                st.metric("Quadrant", latest_row["quadrant"])
+                st.metric("Above 200 DMA", "Yes" if search_above_200dma else "No")
+            with search_metric_col2:
+                st.metric("RS Score", f'{latest_row["score"]:.2f}')
+                st.metric("Breakout", "Yes" if search_breakout else "No")
 
     with ideas_col:
         st.subheader("Top stocks to buy")
@@ -312,7 +443,9 @@ def main() -> None:
 
             ### Notes
             - Sector RRG uses `^NSEI` as the benchmark
+            - Sector comparison can also rotate selected sectors against an equal-weight sector basket
             - Stock RRG inside a sector uses the sector index as the baseline
+            - NIFTY stock search plots an individual stock directly against NIFTY 50
             - Zerodha holdings import seeds the dashboard portfolio and watchlist
             - Buy-list exports are saved as both PNG and PDF
             - Zerodha adapter is included for live workflow extension and currently supports mock fallback

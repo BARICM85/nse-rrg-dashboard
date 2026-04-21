@@ -6,7 +6,9 @@ A Python + Streamlit dashboard for Indian market rotation analysis using Relativ
 
 - Fetches NSE benchmark, sector indices, and stocks using `yfinance`
 - Builds a sector-level RRG against `^NSEI`
+- Lets you rotate a selected sector set against either `^NSEI` or an equal-weight sector basket
 - Builds stock-level RRG inside each selected sector
+- Adds a NIFTY stock search panel for single-stock RRG lookup
 - Detects leading sectors and ranks top stock candidates
 - Applies:
   - 200 DMA trend filter
@@ -71,6 +73,22 @@ If the SDK or credentials are unavailable, the app falls back to mock mode autom
 - Those holdings also seed the watchlist selector automatically
 
 ## How stock selection works
+
+### NIFTY stock search
+
+- Use `NIFTY stock search in RRG` to inspect one stock directly against `^NSEI`
+- This is useful when you want a quick quadrant view without changing the selected sector panel
+- The card also shows:
+  - current quadrant
+  - 200 DMA filter
+  - breakout flag
+
+### Sector rotation comparison
+
+- Use `Sector rotation comparison set` to limit the sector graph to chosen sectors
+- Use `Sector rotation benchmark` to switch between:
+  - `NIFTY 50`
+  - `Equal-weight sector basket`
 
 Top stock candidates are chosen from leading sectors using:
 
