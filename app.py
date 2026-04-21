@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 import streamlit as st
 
 from rrg_dashboard.charts import build_rrg_figure
-from rrg_dashboard.config import DEFAULT_CONFIG, OUTPUTS_DIR, SECTOR_INDEX_UNIVERSE
+from rrg_dashboard.config import DEFAULT_CONFIG, ETF_UNIVERSE, NIFTY_STOCK_SEARCH_UNIVERSE, OUTPUTS_DIR, SECTOR_INDEX_UNIVERSE
 from rrg_dashboard.data_sources import fetch_price_history, latest_available_date
 from rrg_dashboard.rrg import build_rrg_snapshot
 
@@ -35,8 +34,9 @@ def save_chart(fig, filename: str) -> Path:
 
 
 def bootstrap_state() -> None:
-    default_watchlist = ["^NSEPHARMA", "^NSEFMCG", "^NSEBANK", "^NSEIT"]
-    st.session_state.setdefault("rrg_watchlist", default_watchlist)
+    st.session_state.setdefault("rrg_index_watchlist", list(SECTOR_INDEX_UNIVERSE.values()))
+    st.session_state.setdefault("rrg_stock_watchlist", ["HDFCBANK.NS", "ICICIBANK.NS", "RELIANCE.NS", "INFY.NS"])
+    st.session_state.setdefault("rrg_etf_watchlist", ["NIFTYBEES.NS", "BANKBEES.NS", "ITBEES.NS", "GOLDBEES.NS"])
     st.session_state.setdefault("rrg_mode", "Index")
 
 
@@ -45,21 +45,47 @@ def benchmark_key(label: str) -> str:
 
 
 def format_symbol(symbol: str) -> str:
-    return next((label for label, value in SECTOR_INDEX_UNIVERSE.items() if value == symbol), symbol.replace("^", ""))
+    sector_label = next((label for label, value in SECTOR_INDEX_UNIVERSE.items() if value == symbol), None)
+    if sector_label:
+        return sector_label
+    etf_label = next((label for label, value in ETF_UNIVERSE.items() if value == symbol), None)
+    if etf_label:
+        return etf_label
+    return symbol.replace("^", "").replace(".NS", "").replace(".BO", "")
 
 
-def render_watchlist_card(available_symbols: list[str]) -> None:
+def active_watchlist_key(mode: str) -> str:
+    return {
+        "Index": "rrg_index_watchlist",
+        "Stock": "rrg_stock_watchlist",
+        "ETF": "rrg_etf_watchlist",
+    }[mode]
+
+
+def current_available_symbols(mode: str, index_symbols: list[str]) -> list[str]:
+    if mode == "Index":
+        return index_symbols
+    if mode == "Stock":
+        return NIFTY_STOCK_SEARCH_UNIVERSE
+    return list(ETF_UNIVERSE.values())
+
+
+def render_watchlist_card(index_symbols: list[str]) -> None:
     asset_mode = st.radio("Asset mode", ["Index", "Stock", "ETF"], horizontal=True, label_visibility="collapsed")
     st.session_state["rrg_mode"] = asset_mode
 
     st.markdown("### Quickly add from your watchlists")
-    if asset_mode != "Index":
-        st.info("This refreshed layout is focused on sector/index RRG first. Stock and ETF watchlists can be layered back in next.")
-        return
 
-    search_text = st.text_input("Search and add indices", value="", placeholder="Search and add indices")
-    watchlist = st.session_state["rrg_watchlist"]
+    watchlist_key = active_watchlist_key(asset_mode)
+    watchlist = st.session_state[watchlist_key]
+    available_symbols = current_available_symbols(asset_mode, index_symbols)
+    search_placeholder = {
+        "Index": "Search and add indices",
+        "Stock": "Search and add stocks",
+        "ETF": "Search and add ETFs",
+    }[asset_mode]
 
+    search_text = st.text_input("Search and add", value="", placeholder=search_placeholder, label_visibility="collapsed")
     filtered_options = [
         symbol
         for symbol in available_symbols
@@ -68,25 +94,25 @@ def render_watchlist_card(available_symbols: list[str]) -> None:
 
     if filtered_options:
         add_symbol = st.selectbox(
-            "Matching indices",
+            "Matching items",
             options=filtered_options,
             format_func=format_symbol,
             label_visibility="collapsed",
         )
         if st.button("Add to watchlist", use_container_width=True):
-            st.session_state["rrg_watchlist"] = watchlist + [add_symbol]
+            st.session_state[watchlist_key] = watchlist + [add_symbol]
             st.rerun()
 
     if not watchlist:
-        st.caption("You have not created any index watchlist yet.")
+        st.caption(f"You have not created any {asset_mode.lower()} watchlist yet.")
     else:
         for idx, symbol in enumerate(watchlist):
             label = format_symbol(symbol)
             row_color = WATCHLIST_ROW_COLORS[idx % len(WATCHLIST_ROW_COLORS)]
             cols = st.columns([0.16, 0.84])
             with cols[0]:
-                if st.button("×", key=f"remove_{symbol}", help=f"Remove {label}"):
-                    st.session_state["rrg_watchlist"] = [item for item in watchlist if item != symbol]
+                if st.button("×", key=f"remove_{asset_mode}_{symbol}", help=f"Remove {label}"):
+                    st.session_state[watchlist_key] = [item for item in watchlist if item != symbol]
                     st.rerun()
             with cols[1]:
                 st.markdown(
@@ -106,10 +132,10 @@ def render_info_panel() -> None:
         <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;padding:1rem 1rem 0.9rem 1rem;
         color:#334155;font-size:0.86rem;line-height:1.55;">
           <strong>Tip:</strong> Click and drag an area of the chart to zoom.<br/>
-          <strong>Note:</strong> RRG charts show you the relative strength and momentum for a group of stocks. Stocks with strong
-          relative strength and momentum appear in the green Leading quadrant. As relative momentum fades, they typically move into
-          the yellow Weakening quadrant. If relative strength then fades, they move into the red Lagging quadrant. Finally, when
-          momentum starts to pick up again, they shift into the blue Improving quadrant.
+          <strong>Note:</strong> RRG charts show you the relative strength and momentum for a group of securities. Strong members
+          appear in the green Leading quadrant. As relative momentum fades, they move into the yellow Weakening quadrant. If relative
+          strength then fades, they move into the red Lagging quadrant. Finally, when momentum starts to pick up again, they shift
+          into the blue Improving quadrant.
         </div>
         """,
         unsafe_allow_html=True,
@@ -156,11 +182,6 @@ def main() -> None:
             color:#6b7280;
             font-size:0.8rem;
         }
-        .rrg-info-link {
-            color:#2563eb;
-            text-decoration:none;
-            font-size:0.8rem;
-        }
         .rrg-watch-card {
             background:#ffffff;
             border:1px solid #e5e7eb;
@@ -185,8 +206,7 @@ def main() -> None:
     )
 
     left_col, right_col = st.columns([4.2, 1.3], gap="large")
-
-    sector_symbols = list(SECTOR_INDEX_UNIVERSE.values())
+    index_symbols = list(SECTOR_INDEX_UNIVERSE.values())
 
     with left_col:
         st.markdown('<div class="rrg-card">', unsafe_allow_html=True)
@@ -196,15 +216,16 @@ def main() -> None:
         with control_col1:
             benchmark_label = st.selectbox("Benchmark", list(BENCHMARK_OPTIONS.keys()), index=0)
         with control_col2:
-            tail_length = st.slider("Tail length", min_value=4, max_value=12, value=6, format="%dweeks")
+            tail_length = st.slider("Tail length", min_value=4, max_value=52, value=6, format="%dweeks")
         with control_col3:
             timeframe = st.selectbox("Candle timeframe", ["Weekly candle", "Daily candle"], index=0)
             include_partial = st.toggle("Include partial candles", value=False)
 
+        asset_mode = st.session_state["rrg_mode"]
         interval = "1wk" if timeframe == "Weekly candle" else "1d"
-        period = "2y" if timeframe == "Weekly candle" else "1y"
+        period = "5y" if timeframe == "Weekly candle" else "2y"
         benchmark_symbol = benchmark_key(benchmark_label)
-        watchlist_symbols = st.session_state["rrg_watchlist"] or ["^NSEPHARMA", "^NSEFMCG", "^NSEBANK", "^NSEIT"]
+        watchlist_symbols = st.session_state[active_watchlist_key(asset_mode)] or current_available_symbols(asset_mode, index_symbols)[:4]
         price_frame = load_prices([benchmark_symbol, *watchlist_symbols], period=period, interval=interval)
 
         if not include_partial and not price_frame.empty and len(price_frame.index) > tail_length:
@@ -214,18 +235,19 @@ def main() -> None:
             price_frame=price_frame,
             benchmark_symbol=benchmark_symbol,
             tail_periods=tail_length,
-            roc_period=14,
-            zscore_window=20,
+            roc_period=DEFAULT_CONFIG.roc_period,
+            zscore_window=DEFAULT_CONFIG.zscore_window,
             labels={symbol: format_symbol(symbol) for symbol in watchlist_symbols},
         )
 
         latest_date = latest_available_date(price_frame)
         latest_date_text = latest_date.strftime("%d %b %Y") if latest_date else "latest close"
-        st.caption(f"Showing data for {tail_length + 1} weeks ending {latest_date_text}")
+        period_label = "weeks" if timeframe == "Weekly candle" else "sessions"
+        st.caption(f"Showing data for {tail_length + 1} {period_label} ending {latest_date_text}")
 
         progress_left, progress_right = st.columns([5.2, 2.1], gap="small")
         with progress_left:
-            st.progress(min((tail_length + 1) / 12, 1.0))
+            st.progress(min((tail_length + 1) / 52, 1.0))
         with progress_right:
             button_cols = st.columns([1.3, 0.7, 0.8])
             with button_cols[0]:
@@ -250,16 +272,17 @@ def main() -> None:
             st.pyplot(fig, use_container_width=True)
 
             if download:
-                output = save_chart(fig, f"rrg_{benchmark_label.lower().replace(' ', '_')}.png")
+                filename_mode = asset_mode.lower()
+                output = save_chart(fig, f"rrg_{filename_mode}_{benchmark_label.lower().replace(' ', '_')}.png")
                 st.success(f"Saved chart to {output}")
             if animate:
-                st.info("Animation is not in this first rebuild yet. I kept the control in place so we can add tail playback next.")
+                st.info("Animation is not implemented yet. The control is kept in place so we can add tail playback next.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right_col:
         st.markdown('<div class="rrg-watch-card">', unsafe_allow_html=True)
-        render_watchlist_card(sector_symbols)
+        render_watchlist_card(index_symbols)
         st.markdown("</div>", unsafe_allow_html=True)
         st.write("")
         render_info_panel()

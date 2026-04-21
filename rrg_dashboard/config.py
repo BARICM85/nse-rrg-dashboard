@@ -90,6 +90,18 @@ NIFTY_STOCK_SEARCH_UNIVERSE = [
 ]
 
 
+ETF_UNIVERSE = {
+    "Nifty BeES": "NIFTYBEES.NS",
+    "Junior BeES": "JUNIORBEES.NS",
+    "Bank BeES": "BANKBEES.NS",
+    "IT BeES": "ITBEES.NS",
+    "Gold BeES": "GOLDBEES.NS",
+    "Silver BeES": "SILVERBEES.NS",
+    "Mirae NYSE FANG+": "MAFANG.NS",
+    "Mirae Nasdaq 100": "MON100.NS",
+}
+
+
 def build_stock_to_sector_map() -> dict[str, str]:
     mapping: dict[str, str] = {}
     for sector_symbol, symbols in SECTOR_STOCK_UNIVERSE.items():
