@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from rrg_dashboard.charts import build_rrg_figure
@@ -31,6 +32,40 @@ def save_chart(fig, filename: str) -> Path:
     output_path = OUTPUTS_DIR / filename
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     return output_path
+
+
+def build_demo_snapshot(symbols: list[str]) -> pd.DataFrame:
+    if not symbols:
+        return pd.DataFrame()
+
+    demo_points = [
+        ("Improving", 96.0, 101.0, [94.8, 95.2, 95.6, 96.0], [99.0, 99.7, 100.3, 101.0]),
+        ("Leading", 102.0, 101.5, [100.8, 101.1, 101.5, 102.0], [99.6, 100.0, 100.7, 101.5]),
+        ("Lagging", 92.4, 94.9, [93.2, 92.6, 92.5, 92.4], [96.0, 95.0, 94.9, 94.9]),
+        ("Leading", 97.2, 101.2, [95.2, 95.6, 96.3, 97.2], [99.4, 100.1, 100.7, 101.2]),
+        ("Weakening", 101.6, 99.6, [102.2, 102.1, 101.9, 101.6], [101.2, 100.7, 100.2, 99.6]),
+        ("Improving", 98.3, 100.5, [97.0, 97.4, 97.9, 98.3], [99.1, 99.6, 100.0, 100.5]),
+    ]
+
+    rows = []
+    for idx, symbol in enumerate(symbols):
+        quadrant, rs_ratio, rs_momentum, tail_x, tail_y = demo_points[idx % len(demo_points)]
+        rows.append(
+            {
+                "symbol": symbol,
+                "label": format_symbol(symbol),
+                "rs_ratio": (rs_ratio - 100) / 4.0,
+                "rs_momentum": (rs_momentum - 100) / 4.0,
+                "quadrant": quadrant,
+                "score": ((rs_ratio - 100) / 4.0) + ((rs_momentum - 100) / 4.0),
+                "tail_x": [(value - 100) / 4.0 for value in tail_x],
+                "tail_y": [(value - 100) / 4.0 for value in tail_y],
+                "tail_dates": [f"T-{offset}" for offset in range(len(tail_x), 0, -1)],
+                "close": 0.0,
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def bootstrap_state() -> None:
@@ -239,6 +274,10 @@ def main() -> None:
             zscore_window=DEFAULT_CONFIG.zscore_window,
             labels={symbol: format_symbol(symbol) for symbol in watchlist_symbols},
         )
+        live_symbol_count = len(snapshot.index) if not snapshot.empty else 0
+        using_demo_snapshot = live_symbol_count < max(2, min(len(watchlist_symbols), 2))
+        if using_demo_snapshot:
+            snapshot = build_demo_snapshot(watchlist_symbols)
 
         latest_date = latest_available_date(price_frame)
         latest_date_text = latest_date.strftime("%d %b %Y") if latest_date else "latest close"
@@ -258,6 +297,8 @@ def main() -> None:
                 show_zone = st.toggle("Zone", value=True)
 
         st.markdown('<div class="rrg-note">Note: Drag window to see historic data</div>', unsafe_allow_html=True)
+        if using_demo_snapshot:
+            st.info("Live Yahoo data is unavailable or incomplete right now, so this chart is showing demo RRG trails for the selected watchlist.")
 
         if snapshot.empty:
             st.warning("No RRG snapshot could be created for the selected benchmark and watchlist.")
