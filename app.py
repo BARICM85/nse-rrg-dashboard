@@ -2,40 +2,29 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable
 
-import pandas as pd
 import streamlit as st
 
 from rrg_dashboard.charts import build_rrg_figure
-from rrg_dashboard.config import (
-    DEFAULT_CONFIG,
-    EXPORTS_DIR,
-    NIFTY_STOCK_SEARCH_UNIVERSE,
-    OUTPUTS_DIR,
-    SECTOR_INDEX_UNIVERSE,
-    SECTOR_STOCK_UNIVERSE,
-    STOCK_TO_SECTOR,
-)
-from rrg_dashboard.data_sources import fetch_price_history
-from rrg_dashboard.exports import save_dataframe_as_pdf, save_dataframe_as_png
-from rrg_dashboard.kite_adapter import KiteGateway
+from rrg_dashboard.config import DEFAULT_CONFIG, OUTPUTS_DIR, SECTOR_INDEX_UNIVERSE
+from rrg_dashboard.data_sources import fetch_price_history, latest_available_date
 from rrg_dashboard.rrg import build_rrg_snapshot
-from rrg_dashboard.screening import (
-    build_sector_stock_snapshot,
-    compute_breakout_flags,
-    compute_ma_filter,
-    filter_snapshot_for_watchlist,
-    rank_top_stock_candidates,
-)
 
 
-st.set_page_config(page_title="NSE RRG Dashboard", layout="wide")
+st.set_page_config(page_title="Relative Rotation Graph", layout="wide")
+
+
+BENCHMARK_OPTIONS = {
+    "Nifty 50": "^NSEI",
+    "Nifty 500": "^CRSLDX",
+}
+
+WATCHLIST_ROW_COLORS = ["#e8f5e9", "#fff8db", "#efe8ff", "#fdecec", "#e8f0ff", "#eaf7f7"]
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def load_prices(symbols: list[str], period: str) -> pd.DataFrame:
-    return fetch_price_history(symbols, period=period)
+def load_prices(symbols: list[str], period: str, interval: str):
+    return fetch_price_history(symbols, period=period, interval=interval)
 
 
 def save_chart(fig, filename: str) -> Path:
@@ -45,59 +34,82 @@ def save_chart(fig, filename: str) -> Path:
     return output_path
 
 
-def unique_preserve_order(items: Iterable[str]) -> list[str]:
-    seen = set()
-    result = []
-    for item in items:
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result
-
-
 def bootstrap_state() -> None:
-    st.session_state.setdefault("rrg_holdings", pd.DataFrame())
-    st.session_state.setdefault("rrg_watchlist_symbols", [])
-    st.session_state.setdefault("rrg_export_messages", [])
+    default_watchlist = ["^NSEPHARMA", "^NSEFMCG", "^NSEBANK", "^NSEIT"]
+    st.session_state.setdefault("rrg_watchlist", default_watchlist)
+    st.session_state.setdefault("rrg_mode", "Index")
 
 
-def display_symbol(symbol: str) -> str:
-    if not symbol:
-        return ""
-    if symbol.startswith("^"):
-        return symbol.replace("^", "")
-    for suffix in (".NS", ".BO"):
-        if symbol.endswith(suffix):
-            return symbol[: -len(suffix)]
-    return symbol
+def benchmark_key(label: str) -> str:
+    return BENCHMARK_OPTIONS.get(label, "^NSEI")
 
 
-def build_equal_weight_basket(price_frame: pd.DataFrame, symbols: list[str], basket_symbol: str = "__SECTOR_BASKET__") -> pd.DataFrame:
-    basket_parts: list[pd.Series] = []
-    for symbol in symbols:
-        if symbol not in price_frame.columns:
-            continue
-        series = price_frame[symbol].dropna()
-        if len(series) < 2:
-            continue
-        basket_parts.append((series / float(series.iloc[0])).rename(symbol))
-
-    if not basket_parts:
-        return pd.DataFrame()
-
-    basket_frame = pd.concat(basket_parts, axis=1).dropna(how="all")
-    basket_series = basket_frame.mean(axis=1).rename(basket_symbol)
-    return pd.concat([price_frame[symbols], basket_series], axis=1).dropna(how="all")
+def format_symbol(symbol: str) -> str:
+    return next((label for label, value in SECTOR_INDEX_UNIVERSE.items() if value == symbol), symbol.replace("^", ""))
 
 
-def render_status_card(title: str, value: str, note: str) -> None:
+def render_watchlist_card(available_symbols: list[str]) -> None:
+    asset_mode = st.radio("Asset mode", ["Index", "Stock", "ETF"], horizontal=True, label_visibility="collapsed")
+    st.session_state["rrg_mode"] = asset_mode
+
+    st.markdown("### Quickly add from your watchlists")
+    if asset_mode != "Index":
+        st.info("This refreshed layout is focused on sector/index RRG first. Stock and ETF watchlists can be layered back in next.")
+        return
+
+    search_text = st.text_input("Search and add indices", value="", placeholder="Search and add indices")
+    watchlist = st.session_state["rrg_watchlist"]
+
+    filtered_options = [
+        symbol
+        for symbol in available_symbols
+        if symbol not in watchlist and search_text.lower() in format_symbol(symbol).lower()
+    ]
+
+    if filtered_options:
+        add_symbol = st.selectbox(
+            "Matching indices",
+            options=filtered_options,
+            format_func=format_symbol,
+            label_visibility="collapsed",
+        )
+        if st.button("Add to watchlist", use_container_width=True):
+            st.session_state["rrg_watchlist"] = watchlist + [add_symbol]
+            st.rerun()
+
+    if not watchlist:
+        st.caption("You have not created any index watchlist yet.")
+    else:
+        for idx, symbol in enumerate(watchlist):
+            label = format_symbol(symbol)
+            row_color = WATCHLIST_ROW_COLORS[idx % len(WATCHLIST_ROW_COLORS)]
+            cols = st.columns([0.16, 0.84])
+            with cols[0]:
+                if st.button("×", key=f"remove_{symbol}", help=f"Remove {label}"):
+                    st.session_state["rrg_watchlist"] = [item for item in watchlist if item != symbol]
+                    st.rerun()
+            with cols[1]:
+                st.markdown(
+                    f"""
+                    <div style="background:{row_color};border-radius:10px;padding:0.62rem 0.8rem;font-size:0.94rem;
+                    color:#1f2937;border:1px solid rgba(15,23,42,0.06);margin-bottom:0.35rem;">
+                      {label}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+
+def render_info_panel() -> None:
     st.markdown(
-        f"""
-        <div style="padding:0.9rem 1rem;border:1px solid rgba(15,23,42,0.12);border-radius:18px;background:#f8fafc;">
-          <div style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.12em;color:#64748b;">{title}</div>
-          <div style="margin-top:0.4rem;font-size:1.3rem;font-weight:700;color:#0f172a;">{value}</div>
-          <div style="margin-top:0.3rem;font-size:0.88rem;color:#475569;">{note}</div>
+        """
+        <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;padding:1rem 1rem 0.9rem 1rem;
+        color:#334155;font-size:0.86rem;line-height:1.55;">
+          <strong>Tip:</strong> Click and drag an area of the chart to zoom.<br/>
+          <strong>Note:</strong> RRG charts show you the relative strength and momentum for a group of stocks. Stocks with strong
+          relative strength and momentum appear in the green Leading quadrant. As relative momentum fades, they typically move into
+          the yellow Weakening quadrant. If relative strength then fades, they move into the red Lagging quadrant. Finally, when
+          momentum starts to pick up again, they shift into the blue Improving quadrant.
         </div>
         """,
         unsafe_allow_html=True,
@@ -106,406 +118,153 @@ def render_status_card(title: str, value: str, note: str) -> None:
 
 def main() -> None:
     bootstrap_state()
-    st.title("NSE Relative Rotation Graph Dashboard")
-    st.caption("Sector rotation, stock rotation inside sectors, and semi-ready candidate discovery for the Indian market.")
 
-    with st.sidebar:
-        st.header("Controls")
-        period = st.selectbox("History period", options=["6mo", "1y", "2y"], index=1)
-        tail_periods = st.slider("Tail length", min_value=5, max_value=20, value=DEFAULT_CONFIG.tail_periods)
-        roc_period = st.slider("RS momentum period", min_value=5, max_value=30, value=DEFAULT_CONFIG.roc_period)
-        zscore_window = st.slider("Z-score window", min_value=10, max_value=60, value=DEFAULT_CONFIG.zscore_window)
-        breakout_window = st.slider("Breakout lookback", min_value=20, max_value=100, value=DEFAULT_CONFIG.breakout_window)
-        max_stocks = st.slider("Top stocks to show", min_value=3, max_value=10, value=5)
-
-        st.divider()
-        st.subheader("Kite Connect")
-        api_key_input = st.text_input("Kite API key", value="", placeholder="Optional if already set in env")
-        access_token_input = st.text_input("Kite access token", value="", type="password", placeholder="Optional if already set in env")
-
-    config = replace(
-        DEFAULT_CONFIG,
-        tail_periods=tail_periods,
-        roc_period=roc_period,
-        zscore_window=zscore_window,
-        breakout_window=breakout_window,
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: #f5f7fb;
+        }
+        div[data-testid="stSidebar"] {
+            display: none;
+        }
+        .rrg-shell {
+            padding-top: 0.2rem;
+        }
+        .rrg-topline {
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            font-size:0.82rem;
+            color:#3b82f6;
+            margin-bottom:0.6rem;
+        }
+        .rrg-card {
+            background:#ffffff;
+            border:1px solid #e5e7eb;
+            border-radius:16px;
+            padding:1rem 1rem 0.7rem 1rem;
+            box-shadow:0 1px 2px rgba(15,23,42,0.04);
+        }
+        .rrg-card-title {
+            font-size:1.18rem;
+            font-weight:700;
+            color:#111827;
+            margin-bottom:0.9rem;
+        }
+        .rrg-note {
+            color:#6b7280;
+            font-size:0.8rem;
+        }
+        .rrg-info-link {
+            color:#2563eb;
+            text-decoration:none;
+            font-size:0.8rem;
+        }
+        .rrg-watch-card {
+            background:#ffffff;
+            border:1px solid #e5e7eb;
+            border-radius:16px;
+            padding:1rem;
+            box-shadow:0 1px 2px rgba(15,23,42,0.04);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    gateway = KiteGateway.from_credentials(api_key=api_key_input, access_token=access_token_input)
-    if gateway.mode == "mock":
-        env_gateway = KiteGateway.from_environment()
-        if env_gateway.mode == "live":
-            gateway = env_gateway
+    st.markdown('<div class="rrg-shell">', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="rrg-topline">
+          <div>Relative Rotation Graph</div>
+          <div>◎ Watch Demo</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with st.sidebar:
-        if st.button("Import Zerodha holdings", use_container_width=True):
-            holdings_frame = gateway.fetch_holdings()
-            st.session_state["rrg_holdings"] = holdings_frame
-            if holdings_frame.empty:
-                st.warning("No Zerodha holdings were returned. Check Kite credentials or access token.")
-            else:
-                imported_symbols = unique_preserve_order(holdings_frame["yfinance_symbol"].tolist())
-                st.session_state["rrg_watchlist_symbols"] = unique_preserve_order(
-                    st.session_state["rrg_watchlist_symbols"] + imported_symbols
-                )
-                st.success(f"Imported {len(holdings_frame)} holdings from Zerodha.")
+    left_col, right_col = st.columns([4.2, 1.3], gap="large")
 
-    holdings_frame = st.session_state["rrg_holdings"]
-    imported_holding_symbols = unique_preserve_order(holdings_frame.get("yfinance_symbol", pd.Series(dtype=str)).tolist()) if not holdings_frame.empty else []
-
-    benchmark = config.benchmark_symbol
-    broad_benchmark = config.broad_benchmark_symbol
     sector_symbols = list(SECTOR_INDEX_UNIVERSE.values())
-    sector_labels = {value: key for key, value in SECTOR_INDEX_UNIVERSE.items()}
-    tracked_stock_symbols = unique_preserve_order(
-        [symbol for sector_symbols_list in SECTOR_STOCK_UNIVERSE.values() for symbol in sector_symbols_list]
-    )
-    stock_search_options = unique_preserve_order(NIFTY_STOCK_SEARCH_UNIVERSE + tracked_stock_symbols + imported_holding_symbols)
-    sector_prices_nifty50 = load_prices([benchmark, *sector_symbols], period=period)
-    sector_snapshot = build_rrg_snapshot(
-        price_frame=sector_prices_nifty50,
-        benchmark_symbol=benchmark,
-        tail_periods=config.tail_periods,
-        roc_period=config.roc_period,
-        zscore_window=config.zscore_window,
-        labels=sector_labels,
-    )
-    sector_prices_nifty500 = load_prices([broad_benchmark, *sector_symbols], period=period)
-    sector_snapshot_nifty500 = build_rrg_snapshot(
-        price_frame=sector_prices_nifty500,
-        benchmark_symbol=broad_benchmark,
-        tail_periods=config.tail_periods,
-        roc_period=config.roc_period,
-        zscore_window=config.zscore_window,
-        labels=sector_labels,
-    )
 
-    if sector_snapshot.empty:
-        st.error("No sector data could be loaded. Check network access or data provider response.")
-        return
-    if sector_snapshot_nifty500.empty:
-        st.warning("NIFTY 500 sector rotation could not be loaded right now. The NIFTY 50 sector view is still available.")
+    with left_col:
+        st.markdown('<div class="rrg-card">', unsafe_allow_html=True)
+        st.markdown('<div class="rrg-card-title">Relative Rotation Graph ⓘ</div>', unsafe_allow_html=True)
 
-    leading_sector_rows = sector_snapshot.loc[sector_snapshot["quadrant"] == "Leading"].copy()
-    sector_comparison_selection = st.multiselect(
-        "Sector rotation comparison set",
-        options=sector_symbols,
-        default=sector_symbols,
-        format_func=lambda symbol: sector_labels.get(symbol, symbol),
-        help="Choose which sectors to include in the sector rotation graph.",
-    )
-    sector_rotation_mode = st.radio(
-        "Sector rotation benchmark",
-        options=["NIFTY 50", "Equal-weight sector basket"],
-        horizontal=True,
-        help="Compare selected sectors against NIFTY 50 or against their own equal-weight basket.",
-    )
-    if not sector_comparison_selection:
-        sector_comparison_selection = sector_symbols
+        control_col1, control_col2, control_col3 = st.columns([1.2, 1.2, 1.25], gap="large")
+        with control_col1:
+            benchmark_label = st.selectbox("Benchmark", list(BENCHMARK_OPTIONS.keys()), index=0)
+        with control_col2:
+            tail_length = st.slider("Tail length", min_value=4, max_value=12, value=6, format="%dweeks")
+        with control_col3:
+            timeframe = st.selectbox("Candle timeframe", ["Weekly candle", "Daily candle"], index=0)
+            include_partial = st.toggle("Include partial candles", value=False)
 
-    selected_sector_prices_50 = sector_prices_nifty50[[benchmark, *sector_comparison_selection]].copy()
-    selected_sector_prices_500 = sector_prices_nifty500[[broad_benchmark, *sector_comparison_selection]].copy()
-    if sector_rotation_mode == "Equal-weight sector basket" and len(sector_comparison_selection) >= 2:
-        sector_rotation_prices = build_equal_weight_basket(selected_sector_prices_50, sector_comparison_selection)
-        sector_rotation_snapshot = build_rrg_snapshot(
-            price_frame=sector_rotation_prices,
-            benchmark_symbol="__SECTOR_BASKET__",
-            tail_periods=config.tail_periods,
-            roc_period=config.roc_period,
-            zscore_window=config.zscore_window,
-            labels=sector_labels,
+        interval = "1wk" if timeframe == "Weekly candle" else "1d"
+        period = "2y" if timeframe == "Weekly candle" else "1y"
+        benchmark_symbol = benchmark_key(benchmark_label)
+        watchlist_symbols = st.session_state["rrg_watchlist"] or ["^NSEPHARMA", "^NSEFMCG", "^NSEBANK", "^NSEIT"]
+        price_frame = load_prices([benchmark_symbol, *watchlist_symbols], period=period, interval=interval)
+
+        if not include_partial and not price_frame.empty and len(price_frame.index) > tail_length:
+            price_frame = price_frame.iloc[:-1]
+
+        snapshot = build_rrg_snapshot(
+            price_frame=price_frame,
+            benchmark_symbol=benchmark_symbol,
+            tail_periods=tail_length,
+            roc_period=14,
+            zscore_window=20,
+            labels={symbol: format_symbol(symbol) for symbol in watchlist_symbols},
         )
-        sector_rotation_title = "Sector Relative Rotation vs equal-weight sector basket"
-    else:
-        sector_rotation_snapshot = build_rrg_snapshot(
-            price_frame=selected_sector_prices_50,
-            benchmark_symbol=benchmark,
-            tail_periods=config.tail_periods,
-            roc_period=config.roc_period,
-            zscore_window=config.zscore_window,
-            labels=sector_labels,
-        )
-        sector_rotation_title = "Sector Relative Rotation vs NIFTY 50"
-    sector_rotation_snapshot_nifty500 = build_rrg_snapshot(
-        price_frame=selected_sector_prices_500,
-        benchmark_symbol=broad_benchmark,
-        tail_periods=config.tail_periods,
-        roc_period=config.roc_period,
-        zscore_window=config.zscore_window,
-        labels=sector_labels,
-    )
 
-    selected_sector_symbol = st.selectbox(
-        "Sector for stock-level RRG",
-        options=sector_symbols,
-        index=0,
-        format_func=lambda symbol: sector_labels.get(symbol, symbol),
-    )
-    selected_sector_name = sector_labels.get(selected_sector_symbol, selected_sector_symbol)
-    selected_sector_stocks = SECTOR_STOCK_UNIVERSE.get(selected_sector_symbol, [])
-    stock_prices = load_prices([selected_sector_symbol, *selected_sector_stocks], period=period)
-    stock_snapshot = build_sector_stock_snapshot(
-        sector_symbol=selected_sector_symbol,
-        sector_prices=stock_prices,
-        config=config,
-    )
-    stock_search_symbol = st.selectbox(
-        "NIFTY stock search in RRG",
-        options=stock_search_options,
-        index=stock_search_options.index("INFY.NS") if "INFY.NS" in stock_search_options else 0,
-        format_func=display_symbol,
-        help="Track an individual stock against NIFTY 50, even if it is outside the currently selected sector pane.",
-    )
-    stock_search_prices = load_prices([benchmark, stock_search_symbol], period=period)
-    stock_search_snapshot = build_rrg_snapshot(
-        price_frame=stock_search_prices,
-        benchmark_symbol=benchmark,
-        tail_periods=config.tail_periods,
-        roc_period=config.roc_period,
-        zscore_window=config.zscore_window,
-        labels={stock_search_symbol: display_symbol(stock_search_symbol)},
-    )
-    searched_stock_sector = STOCK_TO_SECTOR.get(stock_search_symbol)
-    searched_stock_sector_name = sector_labels.get(searched_stock_sector, "Broader NIFTY search universe")
-    stock_search_frame = stock_search_prices.drop(columns=[benchmark], errors="ignore")
-    search_above_200dma = False
-    search_breakout = False
-    if not stock_search_frame.empty:
-        search_above_200dma = bool(compute_ma_filter(stock_search_frame, window=config.ma_window).get(stock_search_symbol, False))
-        search_breakout = bool(compute_breakout_flags(stock_search_frame, window=config.breakout_window).get(stock_search_symbol, False))
+        latest_date = latest_available_date(price_frame)
+        latest_date_text = latest_date.strftime("%d %b %Y") if latest_date else "latest close"
+        st.caption(f"Showing data for {tail_length + 1} weeks ending {latest_date_text}")
 
-    top_candidates = rank_top_stock_candidates(
-        sector_snapshot=sector_snapshot,
-        sector_price_fetcher=lambda symbol: load_prices([symbol, *SECTOR_STOCK_UNIVERSE.get(symbol, [])], period=period),
-        stock_universe=SECTOR_STOCK_UNIVERSE,
-        config=config,
-        limit=max_stocks,
-    )
-    kite_context = gateway.describe()
-    candidate_symbols = unique_preserve_order(top_candidates.get("symbol", pd.Series(dtype=str)).tolist()) if not top_candidates.empty else []
-    watchlist_options = unique_preserve_order(imported_holding_symbols + candidate_symbols)
+        progress_left, progress_right = st.columns([5.2, 2.1], gap="small")
+        with progress_left:
+            st.progress(min((tail_length + 1) / 12, 1.0))
+        with progress_right:
+            button_cols = st.columns([1.3, 0.7, 0.8])
+            with button_cols[0]:
+                animate = st.button("Animate ✨", use_container_width=True)
+            with button_cols[1]:
+                download = st.button("⇩", use_container_width=True)
+            with button_cols[2]:
+                show_zone = st.toggle("Zone", value=True)
 
-    current_watchlist = st.session_state["rrg_watchlist_symbols"]
-    st.session_state["rrg_watchlist_symbols"] = st.multiselect(
-        "Active watchlist",
-        options=watchlist_options,
-        default=[symbol for symbol in current_watchlist if symbol in watchlist_options],
-        help="Seeded from imported Zerodha holdings and current top candidates.",
-    )
-    active_watchlist_symbols = st.session_state["rrg_watchlist_symbols"]
+        st.markdown('<div class="rrg-note">Note: Drag window to see historic data</div>', unsafe_allow_html=True)
 
-    watchlist_snapshots: list[pd.DataFrame] = []
-    for sector_symbol, sector_stock_symbols in SECTOR_STOCK_UNIVERSE.items():
-        sector_watchlist = [symbol for symbol in active_watchlist_symbols if symbol in sector_stock_symbols]
-        if not sector_watchlist:
-            continue
-        prices = load_prices([sector_symbol, *sector_watchlist], period=period)
-        sector_watchlist_snapshot = build_sector_stock_snapshot(sector_symbol=sector_symbol, sector_prices=prices, config=config)
-        if not sector_watchlist_snapshot.empty:
-            sector_watchlist_snapshot["sector_name"] = sector_labels.get(sector_symbol, sector_symbol)
-            watchlist_snapshots.append(filter_snapshot_for_watchlist(sector_watchlist_snapshot, sector_watchlist))
-
-    watchlist_snapshot = pd.concat(watchlist_snapshots, ignore_index=True) if watchlist_snapshots else pd.DataFrame()
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        render_status_card("Benchmark", benchmark, "Primary market reference")
-    with col2:
-        render_status_card("Leading sectors", str(len(leading_sector_rows)), "Current sectors in the leading quadrant")
-    with col3:
-        render_status_card("Stock universe", str(sum(len(items) for items in SECTOR_STOCK_UNIVERSE.values())), "Tracked stocks across configured sectors")
-    with col4:
-        render_status_card("Kite mode", kite_context["mode"], kite_context["note"])
-
-    if not holdings_frame.empty:
-        with st.expander("Imported Zerodha portfolio", expanded=False):
-            st.dataframe(holdings_frame, use_container_width=True, hide_index=True)
-
-    if st.session_state["rrg_export_messages"]:
-        for message in st.session_state["rrg_export_messages"]:
-            st.success(message)
-        st.session_state["rrg_export_messages"] = []
-
-    sector_chart_col, sector_chart_col_two = st.columns(2, gap="large")
-    with sector_chart_col:
-        st.subheader("Sector rotation vs NIFTY 50")
-        sector_fig = build_rrg_figure(
-            snapshot=sector_rotation_snapshot,
-            title=sector_rotation_title,
-            tail_periods=config.tail_periods,
-        )
-        st.pyplot(sector_fig, use_container_width=True)
-        if st.button("Save sector chart PNG"):
-            output = save_chart(sector_fig, "sector_rrg.png")
-            st.success(f"Saved to {output}")
-
-    with sector_chart_col_two:
-        st.subheader("Sector rotation vs NIFTY 500")
-        if sector_rotation_snapshot_nifty500.empty:
-            st.info("NIFTY 500 benchmark data is unavailable for the selected sector set right now.")
+        if snapshot.empty:
+            st.warning("No RRG snapshot could be created for the selected benchmark and watchlist.")
         else:
-            sector_fig_nifty500 = build_rrg_figure(
-                snapshot=sector_rotation_snapshot_nifty500,
-                title="Sector Relative Rotation vs NIFTY 500",
-                tail_periods=config.tail_periods,
+            fig = build_rrg_figure(
+                snapshot=snapshot,
+                title="",
+                tail_periods=tail_length,
+                zone_shading=show_zone,
+                scale_mode="rrg100",
             )
-            st.pyplot(sector_fig_nifty500, use_container_width=True)
-            if st.button("Save sector chart PNG (NIFTY 500)"):
-                output = save_chart(sector_fig_nifty500, "sector_rrg_nifty500.png")
-                st.success(f"Saved to {output}")
+            st.pyplot(fig, use_container_width=True)
 
-    sector_table_col_50, sector_table_col_500 = st.columns(2, gap="large")
-    with sector_table_col_50:
-        st.subheader("Sector quadrant status vs NIFTY 50")
-        sector_table = sector_rotation_snapshot[
-            ["label", "quadrant", "rs_ratio", "rs_momentum", "score"]
-        ].rename(
-            columns={
-                "label": "Sector",
-                "quadrant": "Quadrant",
-                "rs_ratio": "RS Ratio",
-                "rs_momentum": "RS Momentum",
-                "score": "Score",
-            }
-        )
-        st.dataframe(sector_table, use_container_width=True, hide_index=True)
+            if download:
+                output = save_chart(fig, f"rrg_{benchmark_label.lower().replace(' ', '_')}.png")
+                st.success(f"Saved chart to {output}")
+            if animate:
+                st.info("Animation is not in this first rebuild yet. I kept the control in place so we can add tail playback next.")
 
-    with sector_table_col_500:
-        st.subheader("Sector quadrant status vs NIFTY 500")
-        if sector_rotation_snapshot_nifty500.empty:
-            st.info("No NIFTY 500 sector quadrant table available right now.")
-        else:
-            sector_table_nifty500 = sector_rotation_snapshot_nifty500[
-                ["label", "quadrant", "rs_ratio", "rs_momentum", "score"]
-            ].rename(
-                columns={
-                    "label": "Sector",
-                    "quadrant": "Quadrant",
-                    "rs_ratio": "RS Ratio",
-                    "rs_momentum": "RS Momentum",
-                    "score": "Score",
-                }
-            )
-            st.dataframe(sector_table_nifty500, use_container_width=True, hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    stock_col, search_col, ideas_col = st.columns([1.2, 1.0, 1.0], gap="large")
-    with stock_col:
-        st.subheader(f"Stock RRG inside {selected_sector_name}")
-        if stock_snapshot.empty:
-            st.info("No stock snapshot available for this sector yet.")
-        else:
-            stock_fig = build_rrg_figure(
-                snapshot=stock_snapshot,
-                title=f"Stock rotation inside {selected_sector_name}",
-                tail_periods=config.tail_periods,
-            )
-            st.pyplot(stock_fig, use_container_width=True)
-            if st.button("Save stock chart PNG"):
-                output = save_chart(stock_fig, f"{selected_sector_symbol.replace('^', '')}_stock_rrg.png")
-                st.success(f"Saved to {output}")
+    with right_col:
+        st.markdown('<div class="rrg-watch-card">', unsafe_allow_html=True)
+        render_watchlist_card(sector_symbols)
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.write("")
+        render_info_panel()
 
-    with search_col:
-        st.subheader(f"NIFTY stock search: {display_symbol(stock_search_symbol)}")
-        if stock_search_snapshot.empty:
-            st.info("This stock does not have enough clean history yet to build an RRG trail.")
-        else:
-            search_fig = build_rrg_figure(
-                snapshot=stock_search_snapshot,
-                title=f"{display_symbol(stock_search_symbol)} vs NIFTY 50",
-                tail_periods=config.tail_periods,
-            )
-            st.pyplot(search_fig, use_container_width=True)
-            latest_row = stock_search_snapshot.iloc[0]
-            st.caption(f"Mapped sector context: {searched_stock_sector_name}")
-            search_metric_col1, search_metric_col2 = st.columns(2)
-            with search_metric_col1:
-                st.metric("Quadrant", latest_row["quadrant"])
-                st.metric("Above 200 DMA", "Yes" if search_above_200dma else "No")
-            with search_metric_col2:
-                st.metric("RS Score", f'{latest_row["score"]:.2f}')
-                st.metric("Breakout", "Yes" if search_breakout else "No")
-
-    with ideas_col:
-        st.subheader("Top stocks to buy")
-        if top_candidates.empty:
-            st.info("No current candidates passed the sector and stock filters.")
-        else:
-            display = top_candidates[
-                ["sector_name", "symbol", "quadrant", "close", "above_200dma", "breakout", "score"]
-            ].rename(
-                columns={
-                    "sector_name": "Sector",
-                    "symbol": "Stock",
-                    "quadrant": "Quadrant",
-                    "close": "Close",
-                    "above_200dma": "Above 200 DMA",
-                    "breakout": "Breakout",
-                    "score": "Score",
-                }
-            )
-            st.dataframe(display, use_container_width=True, hide_index=True)
-
-            export_col1, export_col2 = st.columns(2)
-            with export_col1:
-                if st.button("Export buy list PNG", use_container_width=True):
-                    path = save_dataframe_as_png(display, "Top Stocks To Buy", EXPORTS_DIR / "top_stocks_to_buy.png")
-                    st.session_state["rrg_export_messages"] = [f"PNG export saved to {path}"]
-                    st.rerun()
-            with export_col2:
-                if st.button("Export buy list PDF", use_container_width=True):
-                    path = save_dataframe_as_pdf(display, "Top Stocks To Buy", EXPORTS_DIR / "top_stocks_to_buy.pdf")
-                    st.session_state["rrg_export_messages"] = [f"PDF export saved to {path}"]
-                    st.rerun()
-
-    st.subheader("Current watchlist quadrant status")
-    if watchlist_snapshot.empty:
-        st.info("No watchlist symbols are active yet. Import Zerodha holdings or select symbols from the watchlist selector.")
-    else:
-        watchlist_display = watchlist_snapshot[
-            ["sector_name", "symbol", "quadrant", "rs_ratio", "rs_momentum", "above_200dma", "breakout", "score"]
-        ].rename(
-            columns={
-                "sector_name": "Sector",
-                "symbol": "Stock",
-                "quadrant": "Quadrant",
-                "rs_ratio": "RS Ratio",
-                "rs_momentum": "RS Momentum",
-                "above_200dma": "Above 200 DMA",
-                "breakout": "Breakout",
-                "score": "Score",
-            }
-        )
-        st.dataframe(watchlist_display, use_container_width=True, hide_index=True)
-
-    with st.expander("Kite Connect context", expanded=False):
-        st.json(kite_context)
-
-    with st.expander("Terminal README", expanded=False):
-        st.markdown(
-            """
-            ### How to read this dashboard
-            - **Leading**: strong relative strength and improving momentum
-            - **Weakening**: strong relative strength but momentum fading
-            - **Lagging**: weak strength and weak momentum
-            - **Improving**: weak strength but momentum is recovering
-
-            ### Candidate logic
-            1. Sector must be leading
-            2. Stock should be in Leading or Improving
-            3. Stock should be above 200 DMA
-            4. Breakouts receive a ranking boost
-            5. RRG score combines RS ratio and momentum
-
-            ### Notes
-            - Sector RRG uses `^NSEI` as the benchmark
-            - Sector comparison can also rotate selected sectors against an equal-weight sector basket
-            - Stock RRG inside a sector uses the sector index as the baseline
-            - NIFTY stock search plots an individual stock directly against NIFTY 50
-            - Zerodha holdings import seeds the dashboard portfolio and watchlist
-            - Buy-list exports are saved as both PNG and PDF
-            - Zerodha adapter is included for live workflow extension and currently supports mock fallback
-            """
-        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
